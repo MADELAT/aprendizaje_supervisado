@@ -1,52 +1,67 @@
 from flask import Flask, request, jsonify
 import pickle
 import numpy as np
+import pandas as pd
 
 app = Flask(__name__)
 
-# Cargar el modelo pickle al iniciar la app
-MODEL_PATH = "modelo.pkl"
+# Intentar cargar pipeline completo (preprocesamiento + escalador + modelo)
+PIPELINE_PATH = "pipeline.pkl"
+modelo = None
+pipeline = None
 try:
-    with open(MODEL_PATH, "rb") as f:
-        modelo = pickle.load(f)
-    print(f"Modelo cargado desde {MODEL_PATH}")
-    # Confirmar n_features_in_ si existe
-    if hasattr(modelo, "n_features_in_"):
-        print("n_features_in_:", modelo.n_features_in_)
-    else:
-        print("Advertencia: el modelo no tiene atributo n_features_in_")
+    with open(PIPELINE_PATH, "rb") as f:
+        pipeline = pickle.load(f)
+    print(f"Pipeline cargado desde {PIPELINE_PATH}")
+    try:
+        print("pipeline steps:", pipeline.named_steps.keys())
+    except Exception:
+        pass
 except Exception as e:
-    modelo = None
-    print(f"No se pudo cargar {MODEL_PATH}: {e}")
+    pipeline = None
+    print(f"No se pudo cargar {PIPELINE_PATH}: {e}")
 
 
 @app.route("/predecir", methods=["POST"])
 def predecir():
-    if modelo is None:
-        return jsonify({"error": "Modelo no disponible"}), 500
+    # Preferir pipeline (acepta JSON humano con las 7 features en columnas)
     data = request.get_json(force=True)
-    if not data or "input" not in data:
-        return (
-            jsonify(
-                {
-                    "error": 'JSON inválido. Se requiere key "input" con lista de características.'
-                }
-            ),
-            400,
-        )
+    if pipeline is None:
+        return jsonify({"error": "Pipeline no disponible"}), 500
+
+    # columnas esperadas en el JSON humano
+    expected = ["Pclass", "Sex", "Age", "SibSp", "Parch", "Fare", "Embarked"]
+    # Aceptar dos formatos: diccionario con keys, o {'input':[...]} lista en orden esperada
     try:
-        arr = np.array(data["input"], dtype=float)
-        arr = arr.reshape(1, -1)
-        # Validar que haya exactamente 7 features entrantes (ya procesadas)
-        if arr.shape[1] != 7:
+        if isinstance(data, dict) and all(k in data for k in expected):
+            df = pd.DataFrame([{k: data[k] for k in expected}])
+        elif isinstance(data, dict) and "input" in data:
+            arr = np.array(
+                data["input"]
+            )  # no forzamos float here to preserve categorical strings
+            arr = arr.reshape(1, -1)
+            if arr.shape[1] != len(expected):
+                return (
+                    jsonify(
+                        {
+                            "error": f"input must have {len(expected)} features, got {arr.shape[1]}"
+                        }
+                    ),
+                    400,
+                )
+            df = pd.DataFrame(arr, columns=expected)
+        else:
             return (
-                jsonify({"error": f"input must have 7 features, got {arr.shape[1]}"}),
+                jsonify(
+                    {
+                        "error": f"JSON inválido. Envíe un dict con keys {expected} o 'input' lista."
+                    }
+                ),
                 400,
             )
-        pred = modelo.predict(arr)
-        # Asegurar entero 0/1
-        val = int(pred[0])
-        return jsonify({"prediccion": val})
+
+        pred = pipeline.predict(df)
+        return jsonify({"Survived": int(pred[0])})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
